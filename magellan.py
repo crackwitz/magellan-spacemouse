@@ -1,11 +1,24 @@
 from __future__ import division
 import time
 import serial
-import visual
 from ctypes import *
+
+# see also:
+# http://spacemice.org/pdf/Magellan_Programmers_Manual_2000.pdf
+# http://paulbourke.net/dataformats/spacemouse/
 
 def iround(x):
 	return int(round(x))
+
+def blocks(n, seq):
+	block = []
+	for x in seq:
+		block.append(x)
+		if len(block) >= n:
+			yield block
+			block = []
+	if len(block) > 0:
+		yield block
 
 def bitcount(n):
 	c = 0
@@ -14,7 +27,13 @@ def bitcount(n):
 		n >>= 1
 	return c
 
-def enc(*values):
+def decode_nibbles(nibbles, width):
+	N = len(nibbles)
+	value = sum(n << (width * i) for i,n in enumerate(reversed(nibbles)))
+	offset = 2 ** (width * N - 1)
+	return value - offset
+
+def magellan_encode(*values):
 	values = list(values)
 	res = []
 	while values:
@@ -39,6 +58,19 @@ def bits2int(*bits):
 		res = (res << 1) | int(bool(b))
 	return res
 
+def splitfirst(sep, subj):
+	if sep not in subj:
+		return (None, subj)
+		#raise ValueError("separator not found in string, nothing to split")
+
+	pos = subj.find(sep)
+	#assert(subj[pos:].startswith(sep))
+	piece = subj[:pos]
+	remainder = subj[pos+len(sep):]
+
+	return (piece, remainder)
+
+
 class Magellan(object):
 	def __init__(self, comport):
 		self.ser = serial.Serial(port=comport, stopbits=serial.STOPBITS_TWO, rtscts=True, timeout=1.0)
@@ -58,25 +90,25 @@ class Magellan(object):
 		assert 0 <= dmax <= 15
 		assert 0 <= dmin <= 15
 		
-		self.ser.write(enc('p', dmax, dmin))
+		self.ser.write(magellan_encode('p', dmax, dmin))
 	
 	def set_mode(self, dom=None, translation=None, rotation=None):
 		mouse = 0 # 3D mode, not mouse mode
 		
 		# TODO: get_mode, handle None args
 		
-		self.ser.write(enc('m', bits(mouse, dom, translation, rotation))
+		self.ser.write(magellan_encode('m', bits(mouse, dom, translation, rotation)))
 	
 	def get_mode(self):
-		ser.write(enc("mQ"))
+		ser.write(magellan_encode("mQ"))
 	
 	def set_compression(self, compress=True):
 		self.compressed = compress
 		
 		if compress:
-			self.ser.write(enc('c', 0b0011, 0b0101))
+			self.ser.write(magellan_encode('c', 0b0011, 0b0101))
 		else:
-			self.ser.write(enc('c', 0b0011, 0b0100))
+			self.ser.write(magellan_encode('c', 0b0011, 0b0100))
 	
 	def dispatch(self):
 		while True:
@@ -131,19 +163,19 @@ def hexdump(s):
 	return ' '.join(c.encode('hex').upper() for c in s)
 
 if 1:
-	ser = serial.Serial(port=0, stopbits=serial.STOPBITS_TWO, rtscts=True, timeout=1.0)
+	ser = serial.Serial(port="COM7", stopbits=serial.STOPBITS_TWO, rtscts=True, timeout=1.0)
 
 	while ser.inWaiting() > 0:
 		print "garbage:", repr(ser.read(1))
 		
 	# speed: 40ms
-	ser.write(enc('p', 1, 1))
+	ser.write(magellan_encode('p', 1, 1))
 
 	compressed = True
 	if compressed:
-		ser.write(enc('c', 0b0011, 0b0101))
+		ser.write(magellan_encode('c', 0b0011, 0b0101))
 	else:
-		ser.write(enc('c', 0b0011, 0b0100))
+		ser.write(magellan_encode('c', 0b0011, 0b0100))
 
 	buffer = ""
 	lastcommand = timer()
@@ -155,28 +187,35 @@ if 1:
 		
 		buffer += chunk
 		
-		while '\r' in buffer:
-			pos = buffer.find('\r')
-			assert(buffer[pos] == '\r')
-			packet = buffer[:pos]
-			buffer = buffer[pos+1:]
+		while True:
+			(packet, buffer) = splitfirst("\r", buffer)
+			if packet is None: break
 
 			ptype = packet[0]
 			data = packet[1:]
-			print "->", ptype, ":", hexdump(data), "."
+			#print "->", ptype, ":", hexdump(data), "."
 			
+			nibblevalue = 0
+
 			if compressed and ptype == 'd':
+				nibblevalue = 6
 				nibbles = [ord(c) & 0x3f for c in data]
-				assert sum(ord(b) for b in data[:-2]) == nibbles[-2]*64+nibbles[-1]
+				assert sum(ord(b) for b in data[:-2]) == (nibbles[-2] << nibblevalue) + nibbles[-1], "checksum failed"
+				nibbles = nibbles[:-2]
 			else:
+				nibblevalue = 4
 				nibbles = [ord(c) & 0xf for c in data]
 			
-			print "->", ptype, ":", ' '.join("%2d" % n for n in nibbles), "."
+			if ptype == 'd':
+				values = [decode_nibbles(val, width=nibblevalue) for val in blocks(2, nibbles)]
+				print "->", "T {0:4d} {1:4d} {2:4d} : R {3:4d} {4:4d} {5:4d}".format(*values)
+			else:
+				print "->", ptype, ":", ' '.join("%2d" % n for n in nibbles), "."
+
 			
 				
-				
 			t = timer()
-			print "after %4.1f ms" % ((t-lastcommand)*1000)
+			#print "after %4.1f ms" % ((t-lastcommand)*1000)
 			lastcommand = t
 			
 
